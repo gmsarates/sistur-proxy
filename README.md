@@ -16,8 +16,9 @@ Como a conexão parte do seu PC, funciona atrás de CGNAT e sem abrir porta no r
 
 ## 1. Subir o relay no Railway
 
-1. No mesmo projeto da Evolution, crie um serviço a partir da pasta `relay/`
-   (repositório no GitHub com *Root Directory* = `relay`, ou `railway up` dentro da pasta).
+1. No mesmo projeto da Evolution, crie um serviço a partir deste repositório no GitHub.
+   O Railway encontra o `Dockerfile` da raiz sozinho. Deixe **Root Directory** e
+   **Dockerfile Path** vazios.
 2. Variáveis do serviço:
    | Variável     | Valor                                  |
    |--------------|----------------------------------------|

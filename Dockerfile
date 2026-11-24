@@ -1,3 +1,5 @@
+# Relay do Evo Proxy (para o Railway). O Railway detecta este Dockerfile sozinho.
+# O app desktop NÃO usa este arquivo: ele é compilado com `go build`.
 FROM alpine:3.20
 
 ARG CHISEL_VERSION=1.10.1
@@ -7,7 +9,7 @@ RUN apk add --no-cache socat curl \
  && chmod +x /usr/local/bin/chisel \
  && apk del curl
 
-COPY start.sh /start.sh
+COPY relay/start.sh /start.sh
 RUN chmod +x /start.sh
 
 CMD ["/start.sh"]
