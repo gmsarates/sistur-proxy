@@ -25,6 +25,8 @@ Como a conexão parte do seu PC, funciona atrás de CGNAT e sem abrir porta no r
    | `AUTH`       | `usuario:senha` do túnel (o app usa este) |
    | `SOCKS_AUTH` | `usuario:senha` do proxy SOCKS (a Evolution usa este). Sem ela, vale o mesmo do `AUTH` |
    | `SOCKS_PORT` | opcional, padrão `1080`                |
+   | `TUNNEL_PORTS` | opcional, padrão `1081,1082`: portas dos aparelhos do túnel, em ordem de prioridade (PC = 1081, TV box = 1082) |
+   | `GOST_DEBUG` | opcional, `1` mostra no log por qual aparelho sai cada conexão |
 
    Senhas sem espaço. O SOCKS **sempre** exige usuário e senha: a Evolution não grava
    proxy com usuário/senha em branco.
@@ -72,6 +74,25 @@ Para sair de vez: bandeja → **Sair**.
 
 ---
 
+## 4. TV box (opcional, recomendado)
+
+Uma TV box ou celular Android sempre ligado pode ser um segundo aparelho do túnel, junto com o PC:
+veja [`tvbox/README.md`](tvbox/README.md). O relay usa o primeiro aparelho disponível na ordem de
+`TUNNEL_PORTS` e passa para o outro se ele cair.
+
+---
+
+## Limitações (leia antes de usar com clientes)
+
+- **Sem nenhum aparelho conectado, a Evolution fica sem saída.** Com o app do PC fechado (e a TV box desligada/sem internet), a Evolution fica sem saída:
+  os WhatsApps de todas as instâncias desconectam e a criação de instâncias novas falha ("Invalid proxy", porque a
+  Evolution testa o proxy antes de gravar). O app reconecta sozinho quando o PC volta.
+- Todas as instâncias saem pelo mesmo IP residencial. Para várias agências, prefira um proxy residencial/móvel
+  contratado (mesmo formato: socks5 com usuário e senha), ou uma máquina sempre ligada, e use este relay só enquanto
+  houver poucas instâncias.
+- Trocar o `SOCKS_AUTH` exige atualizar o card "Proxy das instâncias" no admin do Turvia e clicar em "Salvar e
+  aplicar"; até lá as instâncias ficam com a senha antiga e perdem a saída.
+
 ## Compilar
 
 Requisitos: Go 1.24+, gcc e as bibliotecas de desenvolvimento do OpenGL/X11.
@@ -103,4 +124,5 @@ Pendente: a opção "Abrir junto com o sistema" só está implementada no Linux
 | `config.go` | dados salvos e validação do formulário |
 | `autostart_*.go` | abrir junto com o sistema |
 | `icons.go` | ícones desenhados em código |
-| `relay/` | script do relay para o Railway: chisel (túnel) + gost (SOCKS5 com senha) |
+| `relay/` | script do relay para o Railway: chisel (túnel) + gost (SOCKS5 com senha, failover entre aparelhos) |
+| `tvbox/` | cliente do túnel para TV box / Android (Termux), em Python |

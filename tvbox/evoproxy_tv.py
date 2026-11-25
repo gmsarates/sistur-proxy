@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""Evo Proxy para TV box / Android (Termux) — o mesmo túnel do app de PC, sem interface gráfica.
+
+Conecta ao relay (chisel) e faz a Evolution sair para a internet pelo IP desta casa.
+Só usa a biblioteca padrão do Python.
+
+Comandos:
+  evoproxy-tv config   pergunta os dados do relay e salva
+  evoproxy-tv start    liga em segundo plano (continua rodando com a tela do Termux fechada)
+  evoproxy-tv stop     desliga
+  evoproxy-tv status   mostra se está conectado e por qual IP
+  evoproxy-tv log      acompanha o log (Ctrl+C para sair)
+  evoproxy-tv run      roda em primeiro plano (útil para testar)
+"""
+
+import argparse
+import getpass
+import gzip
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+APP = "evoproxy-tv"
+CHISEL_VERSION = "1.10.1"
+# Checksums oficiais (chisel_1.10.1_checksums.txt do GitHub do chisel).
+CHISEL_SHA256 = {
+    "linux_arm64": "f55beb68fb99b69903df1adcff4197fbfdb82cb0ee596848c0f055dc219da983",
+    "linux_armv7": "f81c1497d22caa0bb6e461b36e9f46a27f9edeaae3e3994aae2f8a5c2c9b84ef",
+    "linux_armv6": "bc9f6f07709af29191d77a48f451404c0d0fbff686460b3d11982ab1420fce9f",
+    "linux_386": "9737179a33736ecfd3bc6c25d48c0b64285bbc7d06f6494f8650e945cf538741",
+    "linux_amd64": "0525aa3c5d457f2a4075e66221d5125d434bedf15006d3271c213f5cd6ff2230",
+}
+DEFAULT_PORT = 1082  # porta do túnel no relay: o app do PC usa 1081, a TV box 1082
+RESTART_DELAY = 5  # segundos antes de reabrir o chisel se ele fechar
+AUTH_FAIL_RETRY = 60  # senha errada: tenta de novo devagar (pode ter sido trocada no relay)
+
+HOME = os.path.expanduser("~")
+CONF_DIR = os.environ.get("EVOPROXY_TV_HOME") or os.path.join(HOME, ".config", APP)
+CONFIG_FILE = os.path.join(CONF_DIR, "config.json")
+STATE_FILE = os.path.join(CONF_DIR, "state.json")
+LOG_FILE = os.path.join(CONF_DIR, "evoproxy-tv.log")
+PID_FILE = os.path.join(CONF_DIR, "evoproxy-tv.pid")
+BIN_DIR = os.path.join(CONF_DIR, "bin")
+
+
+# ---------------------------------------------------------------- utilidades
+
+def now():
+    return time.strftime("%H:%M:%S")
+
+
+def say(msg):
+    print(f"{now()}  {msg}", flush=True)
+
+
+def ensure_dir():
+    os.makedirs(CONF_DIR, exist_ok=True)
+    os.chmod(CONF_DIR, 0o700)
+
+
+def write_json(path, data, private=False):
+    ensure_dir()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    if private:
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def normalize_url(url):
+    url = url.strip().rstrip("/")
+    if url and "://" not in url:
+        url = "https://" + url
+    return url
+
+
+def validate_url(url):
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+# ---------------------------------------------------------------- configuração
+
+def load_config():
+    cfg = read_json(CONFIG_FILE)
+    if not cfg:
+        return None
+    if not all(cfg.get(k) for k in ("relay_url", "user", "password")):
+        return None
+    cfg.setdefault("port", DEFAULT_PORT)
+    return cfg
+
+
+def ask(prompt, default=None, secret=False):
+    suffix = f" [{default}]" if default and not secret else ""
+    suffix = " [manter a atual]" if default and secret else suffix
+    while True:
+        value = (getpass.getpass if secret else input)(f"{prompt}{suffix}: ").strip()
+        if value:
+            return value
+        if default:
+            return default
+
+
+def cmd_config(_args=None):
+    old = read_json(CONFIG_FILE) or {}
+    print("Configuração do Evo Proxy (TV box)")
+    print("Use os mesmos dados do app do PC: o domínio público do relay e o usuário/senha da variável AUTH.\n")
+
+    while True:
+        url = normalize_url(ask("Endereço do relay", old.get("relay_url")))
+        if validate_url(url):
+            break
+        print("  Endereço inválido. Exemplo: https://meu-relay.up.railway.app")
+    user = ask("Usuário", old.get("user"))
+    password = ask("Senha", old.get("password"), secret=True)
+    while True:
+        raw = ask("Porta do túnel no relay (cada aparelho conectado ao mesmo tempo precisa de uma)",
+                  str(old.get("port", DEFAULT_PORT)))
+        if raw.isdigit() and 1 <= int(raw) <= 65535:
+            port = int(raw)
+            break
+        print("  Porta inválida.")
+
+    write_json(CONFIG_FILE, {"relay_url": url, "user": user, "password": password, "port": port},
+               private=True)
+    print(f"\nSalvo em {CONFIG_FILE} (só o seu usuário consegue ler).")
+    if is_running():
+        print("O túnel está ligado: rode `evoproxy-tv stop` e `evoproxy-tv start` para usar os novos dados.")
+    else:
+        print("Para ligar em segundo plano: evoproxy-tv start")
+
+
+# ---------------------------------------------------------------- binário do chisel
+
+def chisel_arch():
+    machine = platform.machine().lower()
+    if machine in ("aarch64", "arm64"):
+        return "linux_arm64"
+    if machine in ("armv7l", "armv8l", "armv7", "arm"):
+        return "linux_armv7"
+    if machine.startswith("armv6"):
+        return "linux_armv6"
+    if machine in ("i386", "i686", "x86"):
+        return "linux_386"
+    if machine in ("x86_64", "amd64"):
+        return "linux_amd64"
+    raise SystemExit(f"Processador não suportado: {machine}")
+
+
+def chisel_path():
+    custom = os.environ.get("EVOPROXY_TV_CHISEL")
+    if custom:
+        return custom
+    return os.path.join(BIN_DIR, f"chisel-{CHISEL_VERSION}")
+
+
+def ensure_chisel():
+    path = chisel_path()
+    if os.path.isfile(path) and os.access(path, os.X_OK):
+        return path
+    arch = chisel_arch()
+    name = f"chisel_{CHISEL_VERSION}_{arch}.gz"
+    url = f"https://github.com/jpillora/chisel/releases/download/v{CHISEL_VERSION}/{name}"
+    say(f"Baixando o chisel {CHISEL_VERSION} ({arch})…")
+    with urllib.request.urlopen(url, timeout=60) as resp:
+        data = resp.read()
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != CHISEL_SHA256[arch]:
+        raise SystemExit("O arquivo baixado do chisel não confere com o checksum oficial. Abortando.")
+    os.makedirs(BIN_DIR, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(gzip.decompress(data))
+    os.chmod(tmp, os.stat(tmp).st_mode | stat.S_IXUSR)
+    os.replace(tmp, path)
+    say("chisel pronto (checksum conferido).")
+    return path
+
+
+# ---------------------------------------------------------------- tradução do log
+
+RE_PREFIX = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ")
+EVENTS = [
+    (re.compile(r"client: Connecting to (.+)"), "conectando", lambda m: f"Conectando a {m.group(1).strip()}"),
+    (re.compile(r"client: Connected \(Latency (.+)\)"), "conectado", lambda m: f"Conectado (latência {m.group(1)})"),
+    (re.compile(r"client: Retrying in (.+?)\.\.\."), "reconectando", lambda m: f"Tentando de novo em {m.group(1)}"),
+    (re.compile(r"client: Connection error: .*cannot listen", re.I), "porta_ocupada", None),
+    (re.compile(r"client: Authentication failed"), "senha_errada",
+     lambda m: "Usuário ou senha do relay incorretos (rode `evoproxy-tv config`)"),
+    (re.compile(r"client: Connection error: (.+)"), "reconectando", lambda m: f"Erro de conexão: {m.group(1)}"),
+    (re.compile(r"client: Disconnected"), "reconectando", lambda m: "Conexão com o relay caiu"),
+]
+
+
+def translate(line, port):
+    """Devolve (evento, mensagem) para uma linha do log do chisel."""
+    text = RE_PREFIX.sub("", line.strip())
+    for regex, event, fmt in EVENTS:
+        m = regex.search(text)
+        if m:
+            if event == "porta_ocupada":
+                return event, (f"A porta {port} do relay já está em uso por outro aparelho. "
+                               "Vou esperar ela liberar (ou escolha outra porta com `evoproxy-tv config`).")
+            return event, fmt(m)
+    return None, text.replace("client: ", "", 1)
+
+
+# ---------------------------------------------------------------- supervisor
+
+class Supervisor:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.proc = None
+        self.stopping = False
+        self.state = {"estado": "iniciando", "desde": time.time(), "ip_saida": None,
+                      "porta": cfg["port"], "relay": cfg["relay_url"], "mensagem": ""}
+
+    def set_state(self, estado, mensagem=None, **extra):
+        if estado != self.state["estado"]:
+            self.state["desde"] = time.time()
+        self.state["estado"] = estado
+        if mensagem is not None:
+            self.state["mensagem"] = mensagem
+        self.state.update(extra)
+        self.state["pid"] = os.getpid()
+        write_json(STATE_FILE, self.state)
+
+    def fetch_exit_ip(self):
+        try:
+            with urllib.request.urlopen("https://api.ipify.org", timeout=10) as r:
+                ip = r.read(64).decode().strip()
+        except (urllib.error.URLError, OSError):
+            ip = None
+        if self.state["estado"] == "conectado":
+            self.set_state("conectado", ip_saida=ip)
+            if ip:
+                say(f"IP de saída: {ip}")
+
+    def stop(self, *_):
+        self.stopping = True
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+
+    def run(self):
+        signal.signal(signal.SIGTERM, self.stop)
+        signal.signal(signal.SIGINT, self.stop)
+        if shutil.which("termux-wake-lock"):
+            subprocess.run(["termux-wake-lock"], check=False)  # impede o Android de "dormir" o túnel
+        binary = ensure_chisel()
+        port = self.cfg["port"]
+        remote = f"R:127.0.0.1:{port}:socks"
+        say(f"Evo Proxy (TV box) — relay {self.cfg['relay_url']}, porta {port}")
+
+        while not self.stopping:
+            env = dict(os.environ, AUTH=f"{self.cfg['user']}:{self.cfg['password']}")
+            self.set_state("conectando", "Iniciando túnel", ip_saida=None)
+            self.proc = subprocess.Popen(
+                [binary, "client", "--keepalive", "25s", "--max-retry-interval", "15s",
+                 self.cfg["relay_url"], remote],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
+                text=True, bufsize=1,
+            )
+            auth_failed = False
+            for line in self.proc.stdout:
+                event, msg = translate(line, port)
+                if not msg:
+                    continue
+                say(msg)
+                if event == "conectado":
+                    self.set_state("conectado", msg)
+                    threading.Thread(target=self.fetch_exit_ip, daemon=True).start()
+                elif event == "porta_ocupada":
+                    self.set_state("porta_ocupada", msg, ip_saida=None)
+                elif event == "senha_errada":
+                    auth_failed = True
+                    self.set_state("senha_errada", msg, ip_saida=None)
+                    self.proc.terminate()
+                elif event in ("conectando", "reconectando"):
+                    if self.state["estado"] != "porta_ocupada" or event == "conectando":
+                        self.set_state(event, msg, ip_saida=None)
+            self.proc.wait()
+            if self.stopping:
+                break
+            delay = AUTH_FAIL_RETRY if auth_failed else RESTART_DELAY
+            if not auth_failed:
+                say(f"O túnel fechou (código {self.proc.returncode}). Reabrindo em {delay}s…")
+            else:
+                say(f"Tentando de novo em {delay}s…")
+            self.set_state("reconectando" if not auth_failed else "senha_errada")
+            for _ in range(delay):
+                if self.stopping:
+                    break
+                time.sleep(1)
+
+        self.set_state("desligado", "Túnel desligado", ip_saida=None)
+        say("Túnel desligado.")
+
+
+def cmd_run(_args=None):
+    cfg = load_config()
+    if not cfg:
+        print("Ainda não configurado.")
+        cmd_config()
+        cfg = load_config()
+    ensure_dir()
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    try:
+        Supervisor(cfg).run()
+    finally:
+        try:
+            if read_pid() == os.getpid():
+                os.remove(PID_FILE)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------- segundo plano
+
+def read_pid():
+    try:
+        with open(PID_FILE) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def is_running():
+    pid = read_pid()
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def cmd_start(_args=None):
+    if is_running():
+        print("Já está ligado. Veja com: evoproxy-tv status")
+        return
+    if not load_config():
+        print("Ainda não configurado.")
+        cmd_config()
+    ensure_dir()
+    log = open(LOG_FILE, "a", encoding="utf-8")
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "run"],
+                     stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                     start_new_session=True)
+    for _ in range(30):
+        time.sleep(0.5)
+        state = read_json(STATE_FILE) or {}
+        if is_running() and state.get("estado") not in (None, "desligado"):
+            break
+    if is_running():
+        print("Ligado em segundo plano. Acompanhe com: evoproxy-tv status  (ou evoproxy-tv log)")
+    else:
+        print(f"Não consegui ligar. Veja o log: {LOG_FILE}")
+
+
+def cmd_stop(_args=None):
+    pid = read_pid()
+    if not pid or not is_running():
+        print("Não está ligado.")
+        return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(20):
+        if not is_running():
+            break
+        time.sleep(0.25)
+    print("Desligado." if not is_running() else "Ainda encerrando… rode `evoproxy-tv status` em instantes.")
+
+
+LABELS = {
+    "conectado": "🟢 Conectado",
+    "conectando": "🟡 Conectando",
+    "reconectando": "🟡 Reconectando",
+    "iniciando": "🟡 Iniciando",
+    "porta_ocupada": "🟠 Esperando a porta liberar",
+    "senha_errada": "🔴 Usuário ou senha incorretos",
+    "desligado": "⚪ Desligado",
+}
+
+
+def cmd_status(_args=None):
+    state = read_json(STATE_FILE) or {}
+    running = is_running()
+    estado = state.get("estado", "desligado") if running else "desligado"
+    print(LABELS.get(estado, estado))
+    if running:
+        mins = int((time.time() - state.get("desde", time.time())) // 60)
+        print(f"  há {mins} min · relay {state.get('relay')} · porta {state.get('porta')}")
+        if state.get("ip_saida"):
+            print(f"  IP de saída: {state['ip_saida']}")
+        if state.get("mensagem") and estado != "conectado":
+            print(f"  {state['mensagem']}")
+
+
+def cmd_log(_args=None):
+    if not os.path.exists(LOG_FILE):
+        print("Ainda não há log.")
+        return
+    with open(LOG_FILE, encoding="utf-8") as f:
+        lines = f.readlines()
+        sys.stdout.writelines(lines[-30:])
+        try:
+            while True:
+                line = f.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+
+
+def main():
+    parser = argparse.ArgumentParser(prog=APP, description="Túnel do Evo Proxy para TV box / Termux")
+    sub = parser.add_subparsers(dest="cmd")
+    for name, fn, help_ in [
+        ("config", cmd_config, "configurar o relay"),
+        ("start", cmd_start, "ligar em segundo plano"),
+        ("stop", cmd_stop, "desligar"),
+        ("status", cmd_status, "ver o estado"),
+        ("log", cmd_log, "acompanhar o log"),
+        ("run", cmd_run, "rodar em primeiro plano"),
+    ]:
+        sub.add_parser(name, help=help_).set_defaults(fn=fn)
+    args = parser.parse_args()
+    if not getattr(args, "fn", None):
+        parser.print_help()
+        return
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

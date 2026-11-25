@@ -11,6 +11,21 @@ if [ -z "$AUTH" ]; then
 fi
 SOCKS_PORT="${SOCKS_PORT:-1080}"
 
+# Portas do túnel, em ordem de prioridade: cada aparelho conectado (app do PC, TV box...)
+# abre o seu SOCKS em 127.0.0.1:<porta> aqui dentro. O gost usa sempre o primeiro que
+# estiver disponível; se ele cair, passa para o próximo. Padrão: PC (1081), depois TV box (1082).
+TUNNEL_PORTS="${TUNNEL_PORTS:-1081,1082}"
+case "$TUNNEL_PORTS" in
+  *[!0-9,]*|,*|*,|*,,*) echo "ERRO: TUNNEL_PORTS deve ser uma lista de portas separadas por vírgula, ex.: 1081,1082" >&2; exit 1 ;;
+esac
+FIRST_PORT="${TUNNEL_PORTS%%,*}"
+TUNNEL_IPS=""
+OLD_IFS="$IFS"; IFS=','
+for p in $TUNNEL_PORTS; do
+  TUNNEL_IPS="${TUNNEL_IPS:+$TUNNEL_IPS,}127.0.0.1:$p"
+done
+IFS="$OLD_IFS"
+
 # Login do SOCKS (o que vai no proxy da Evolution / admin do Turvia).
 # SOCKS_AUTH=usuario:senha; sem ela, usa o mesmo login do AUTH.
 SOCKS_LOGIN="${SOCKS_AUTH:-$AUTH}"
@@ -30,16 +45,24 @@ SECRETS=/tmp/socks-secrets
 umask 077
 printf '%s %s\n' "$SOCKS_USER" "$SOCKS_PASS" > "$SECRETS"
 
-# O app abre um SOCKS sem senha em 127.0.0.1:1081 dentro deste container (túnel chisel).
+# Cada aparelho abre um SOCKS sem senha em 127.0.0.1:<porta> dentro deste container (túnel chisel).
 # O gost expõe na rede privada (IPv4 e IPv6) um SOCKS5 que exige usuário e senha
-# e repassa cada conexão para esse SOCKS do túnel.
+# e repassa cada conexão para o primeiro aparelho disponível (strategy=fifo).
+# Um aparelho que falhar fica de fora por 10s (max_fails/fail_timeout) e a conexão
+# é tentada de novo no próximo (retries). Sem nenhum aparelho, a conexão falha:
+# nunca sai pelo IP do data center.
+GOST_DEBUG_FLAG=""
+[ "$GOST_DEBUG" = "1" ] && GOST_DEBUG_FLAG="-D"
 (
   while true; do
-    gost -L "socks5://:${SOCKS_PORT}?secrets=${SECRETS}" -F "socks5://127.0.0.1:1081" || true
+    gost $GOST_DEBUG_FLAG \
+      -L "socks5://:${SOCKS_PORT}?secrets=${SECRETS}&retries=2" \
+      -F "socks5://127.0.0.1:${FIRST_PORT}?ip=${TUNNEL_IPS}&strategy=fifo&max_fails=1&fail_timeout=10s" || true
     sleep 1
   done
 ) &
 
 echo "SOCKS5 com senha para a Evolution na porta $SOCKS_PORT (rede privada), usuário: $SOCKS_USER"
+echo "Aparelhos do túnel, em ordem de prioridade: $TUNNEL_IPS"
 # chisel lê AUTH do ambiente
 exec chisel server --reverse --host 0.0.0.0 --port "${PORT:-8080}"
