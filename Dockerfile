@@ -3,10 +3,14 @@
 FROM alpine:3.20
 
 ARG CHISEL_VERSION=1.10.1
-RUN apk add --no-cache socat curl \
+ARG GOST_VERSION=2.12.0
+RUN apk add --no-cache curl \
  && curl -fsSL "https://github.com/jpillora/chisel/releases/download/v${CHISEL_VERSION}/chisel_${CHISEL_VERSION}_linux_amd64.gz" \
     | gunzip > /usr/local/bin/chisel \
  && chmod +x /usr/local/bin/chisel \
+ && curl -fsSL "https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_amd64.tar.gz" \
+    | tar xz -C /usr/local/bin gost \
+ && chmod +x /usr/local/bin/gost \
  && apk del curl
 
 COPY relay/start.sh /start.sh

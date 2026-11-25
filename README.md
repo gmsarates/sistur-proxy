@@ -5,7 +5,7 @@ Abra o app e o túnel já fica conectado. Feche o app e a Evolution fica sem sa�
 sem voltar para o IP do data center.
 
 ```
-Evolution ──socks5──► Relay (Railway) ◄══ túnel HTTPS ══ Evo Proxy (seu PC) ──► WhatsApp
+Evolution ──socks5 (usuário+senha)──► Relay (Railway) ◄══ túnel HTTPS ══ Evo Proxy (seu PC) ──► WhatsApp
            relay.railway.internal:1080                    sai com o IP da sua casa
 ```
 
@@ -22,8 +22,12 @@ Como a conexão parte do seu PC, funciona atrás de CGNAT e sem abrir porta no r
 2. Variáveis do serviço:
    | Variável     | Valor                                  |
    |--------------|----------------------------------------|
-   | `AUTH`       | `usuario:senha` (invente uma senha forte) |
+   | `AUTH`       | `usuario:senha` do túnel (o app usa este) |
+   | `SOCKS_AUTH` | `usuario:senha` do proxy SOCKS (a Evolution usa este). Sem ela, vale o mesmo do `AUTH` |
    | `SOCKS_PORT` | opcional, padrão `1080`                |
+
+   Senhas sem espaço. O SOCKS **sempre** exige usuário e senha: a Evolution não grava
+   proxy com usuário/senha em branco.
 3. Em *Settings → Networking*, gere um **domínio público** (ex.: `meu-relay.up.railway.app`).
    É nele que o app conecta. A porta 1080 fica só na rede privada.
 4. Anote o nome interno do serviço: `<nome>.railway.internal`.
@@ -36,8 +40,11 @@ Antes de ler o QR Code, configure o proxy da instância (pelo Manager ou pela AP
 curl -X POST https://SUA-EVOLUTION/proxy/set/NOME_DA_INSTANCIA \
   -H "apikey: SUA_API_KEY" -H "Content-Type: application/json" \
   -d '{"enabled": true, "host": "NOME-DO-RELAY.railway.internal", "port": "1080",
-       "protocol": "socks5", "username": "", "password": ""}'
+       "protocol": "socks5", "username": "USUARIO", "password": "SENHA"}'
 ```
+
+`USUARIO`/`SENHA` são os do `SOCKS_AUTH`. No Turvia, é o mesmo que vai no card
+**Proxy das instâncias** do admin (tipo `socks5`, host `NOME-DO-RELAY.railway.internal`, porta `1080`).
 
 Se a instância já foi conectada pelo IP do data center, desconecte, configure o proxy e leia o QR de novo.
 
@@ -96,4 +103,4 @@ Pendente: a opção "Abrir junto com o sistema" só está implementada no Linux
 | `config.go` | dados salvos e validação do formulário |
 | `autostart_*.go` | abrir junto com o sistema |
 | `icons.go` | ícones desenhados em código |
-| `relay/` | Dockerfile + script do relay para o Railway |
+| `relay/` | script do relay para o Railway: chisel (túnel) + gost (SOCKS5 com senha) |
