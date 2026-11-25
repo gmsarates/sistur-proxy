@@ -23,6 +23,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -45,6 +46,8 @@ CHISEL_SHA256 = {
 DEFAULT_PORT = 1082  # porta do túnel no relay: o app do PC usa 1081, a TV box 1082
 RESTART_DELAY = 5  # segundos antes de reabrir o chisel se ele fechar
 AUTH_FAIL_RETRY = 60  # senha errada: tenta de novo devagar (pode ter sido trocada no relay)
+DNS_RETRY = 15  # sem internet / DNS: tenta de novo a cada 15s
+RERESOLVE_AFTER = 3  # erros de conexão seguidos antes de conferir se o IP do relay mudou
 
 HOME = os.path.expanduser("~")
 CONF_DIR = os.environ.get("EVOPROXY_TV_HOME") or os.path.join(HOME, ".config", APP)
@@ -199,6 +202,65 @@ def ensure_chisel():
     return path
 
 
+# ---------------------------------------------------------------- DNS no Android
+
+def needs_manual_dns():
+    """O chisel oficial é um binário Go estático: ele procura o DNS em /etc/resolv.conf, que não
+    existe no Android, e acaba consultando [::1]:53. Nesses casos resolvemos o nome aqui
+    (o Python do Termux usa o DNS do Android) e passamos o IP ao chisel."""
+    if os.environ.get("EVOPROXY_TV_FORCE_DNS") == "1":
+        return True
+    return not os.path.exists("/etc/resolv.conf")
+
+
+def resolve(host):
+    """Endereços do host, IPv4 primeiro."""
+    infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    v4 = [i[4][0] for i in infos if i[0] == socket.AF_INET]
+    v6 = [i[4][0] for i in infos if i[0] == socket.AF_INET6]
+    seen = []
+    for ip in v4 + v6:
+        if ip not in seen:
+            seen.append(ip)
+    return seen
+
+
+def is_ip(host):
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            socket.inet_pton(family, host)
+            return True
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+def chisel_target(relay_url):
+    """Devolve (url para o chisel, argumentos extras, ip usado ou None).
+
+    Quando o DNS precisa ser feito aqui, troca o nome pelo IP na URL e usa --hostname,
+    que mantém o nome no cabeçalho Host e na verificação do certificado TLS."""
+    parsed = urllib.parse.urlparse(relay_url)
+    host = parsed.hostname or ""
+    if not needs_manual_dns() or not host or is_ip(host):
+        return relay_url, [], None
+    ip = resolve(host)[0]
+    netloc = f"[{ip}]" if ":" in ip else ip
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urllib.parse.urlunparse(parsed._replace(netloc=netloc)), ["--hostname", host], ip
+
+
+def chisel_env(base):
+    env = dict(base)
+    # Certificados do Termux (o Go também acha os do Android, isto é só reforço).
+    prefix = os.environ.get("PREFIX", "")
+    cert = os.path.join(prefix, "etc", "tls", "cert.pem") if prefix else ""
+    if cert and os.path.isfile(cert) and "SSL_CERT_FILE" not in env:
+        env["SSL_CERT_FILE"] = cert
+    return env
+
+
 # ---------------------------------------------------------------- tradução do log
 
 RE_PREFIX = re.compile(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ")
@@ -258,6 +320,18 @@ class Supervisor:
             if ip:
                 say(f"IP de saída: {ip}")
 
+    def sleep(self, seconds):
+        for _ in range(int(seconds)):
+            if self.stopping:
+                return
+            time.sleep(1)
+
+    def relay_ip_changed(self, current_ip):
+        try:
+            return current_ip not in resolve(urllib.parse.urlparse(self.cfg["relay_url"]).hostname)
+        except OSError:
+            return False
+
     def stop(self, *_):
         self.stopping = True
         if self.proc and self.proc.poll() is None:
@@ -274,21 +348,34 @@ class Supervisor:
         say(f"Evo Proxy (TV box) — relay {self.cfg['relay_url']}, porta {port}")
 
         while not self.stopping:
-            env = dict(os.environ, AUTH=f"{self.cfg['user']}:{self.cfg['password']}")
+            env = chisel_env(os.environ)
+            env["AUTH"] = f"{self.cfg['user']}:{self.cfg['password']}"
+            try:
+                url, extra, ip = chisel_target(self.cfg["relay_url"])
+            except OSError as exc:
+                msg = f"Sem internet ou DNS: não consegui encontrar o relay ({exc}). Tentando de novo em {DNS_RETRY}s"
+                say(msg)
+                self.set_state("reconectando", msg, ip_saida=None)
+                self.sleep(DNS_RETRY)
+                continue
+            if ip:
+                say(f"Relay resolvido para {ip}")
             self.set_state("conectando", "Iniciando túnel", ip_saida=None)
             self.proc = subprocess.Popen(
                 [binary, "client", "--keepalive", "25s", "--max-retry-interval", "15s",
-                 self.cfg["relay_url"], remote],
+                 *extra, url, remote],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                 text=True, bufsize=1,
             )
             auth_failed = False
+            errors_in_a_row = 0
             for line in self.proc.stdout:
                 event, msg = translate(line, port)
                 if not msg:
                     continue
                 say(msg)
                 if event == "conectado":
+                    errors_in_a_row = 0
                     self.set_state("conectado", msg)
                     threading.Thread(target=self.fetch_exit_ip, daemon=True).start()
                 elif event == "porta_ocupada":
@@ -300,6 +387,11 @@ class Supervisor:
                 elif event in ("conectando", "reconectando"):
                     if self.state["estado"] != "porta_ocupada" or event == "conectando":
                         self.set_state(event, msg, ip_saida=None)
+                    if ip and msg.startswith("Erro de conexão"):
+                        errors_in_a_row += 1
+                        if errors_in_a_row >= RERESOLVE_AFTER and self.relay_ip_changed(ip):
+                            say("O IP do relay mudou; reconectando com o novo endereço")
+                            self.proc.terminate()
             self.proc.wait()
             if self.stopping:
                 break
@@ -309,10 +401,7 @@ class Supervisor:
             else:
                 say(f"Tentando de novo em {delay}s…")
             self.set_state("reconectando" if not auth_failed else "senha_errada")
-            for _ in range(delay):
-                if self.stopping:
-                    break
-                time.sleep(1)
+            self.sleep(delay)
 
         self.set_state("desligado", "Túnel desligado", ip_saida=None)
         say("Túnel desligado.")
