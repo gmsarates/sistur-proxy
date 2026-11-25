@@ -25,10 +25,19 @@ Usa o mesmo relay e o mesmo login (`AUTH`) do app de PC.
 | `evoproxy-tv status` | mostra se está conectado, há quanto tempo e o IP de saída |
 | `evoproxy-tv log` | acompanha o log (Ctrl+C para sair) |
 | `evoproxy-tv stop` / `start` | desliga / liga em segundo plano |
+| `evoproxy-tv restart` | religa (use depois de atualizar o script) |
 | `evoproxy-tv config` | muda relay, usuário, senha ou porta |
 
 Ele liga sozinho quando a TV box liga (Termux:Boot), reconecta sozinho se a internet ou o relay cair
 e impede o Android de suspender o Termux (`termux-wake-lock`).
+
+## Atualizar
+
+```bash
+cd sistur-proxy && git pull
+bash tvbox/install-termux.sh   # Enter em cada pergunta mantém os dados atuais
+```
+O instalador religa o túnel com a versão nova. No `evoproxy-tv log`, a primeira linha mostra a versão em uso.
 
 ## PC e TV box ao mesmo tempo
 

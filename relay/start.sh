@@ -48,15 +48,15 @@ printf '%s %s\n' "$SOCKS_USER" "$SOCKS_PASS" > "$SECRETS"
 # Cada aparelho abre um SOCKS sem senha em 127.0.0.1:<porta> dentro deste container (túnel chisel).
 # O gost expõe na rede privada (IPv4 e IPv6) um SOCKS5 que exige usuário e senha
 # e repassa cada conexão para o primeiro aparelho disponível (strategy=fifo).
-# Um aparelho que falhar fica de fora por 10s (max_fails/fail_timeout) e a conexão
-# é tentada de novo no próximo (retries). Sem nenhum aparelho, a conexão falha:
-# nunca sai pelo IP do data center.
+# Um aparelho cuja porta não responde fica de fora por 10s (max_fails/fail_timeout):
+# aquela conexão falha e as seguintes já vão para o próximo (a Evolution reconecta
+# sozinha). Sem nenhum aparelho, a conexão falha: nunca sai pelo IP do data center.
 GOST_DEBUG_FLAG=""
 [ "$GOST_DEBUG" = "1" ] && GOST_DEBUG_FLAG="-D"
 (
   while true; do
     gost $GOST_DEBUG_FLAG \
-      -L "socks5://:${SOCKS_PORT}?secrets=${SECRETS}&retries=2" \
+      -L "socks5://:${SOCKS_PORT}?secrets=${SECRETS}" \
       -F "socks5://127.0.0.1:${FIRST_PORT}?ip=${TUNNEL_IPS}&strategy=fifo&max_fails=1&fail_timeout=10s" || true
     sleep 1
   done

@@ -8,12 +8,15 @@ Comandos:
   evoproxy-tv config   pergunta os dados do relay e salva
   evoproxy-tv start    liga em segundo plano (continua rodando com a tela do Termux fechada)
   evoproxy-tv stop     desliga
+  evoproxy-tv restart  religa (use depois de atualizar o script)
   evoproxy-tv status   mostra se está conectado e por qual IP
   evoproxy-tv log      acompanha o log (Ctrl+C para sair)
   evoproxy-tv run      roda em primeiro plano (útil para testar)
 """
 
 import argparse
+import asyncio
+import errno
 import getpass
 import gzip
 import hashlib
@@ -34,6 +37,7 @@ import urllib.parse
 import urllib.request
 
 APP = "evoproxy-tv"
+VERSION = "2026.11.25-3"
 CHISEL_VERSION = "1.10.1"
 # Checksums oficiais (chisel_1.10.1_checksums.txt do GitHub do chisel).
 CHISEL_SHA256 = {
@@ -210,7 +214,15 @@ def needs_manual_dns():
     (o Python do Termux usa o DNS do Android) e passamos o IP ao chisel."""
     if os.environ.get("EVOPROXY_TV_FORCE_DNS") == "1":
         return True
-    return not os.path.exists("/etc/resolv.conf")
+    # Android/Termux: sempre (o resolv.conf do Android, quando existe, não serve ao Go).
+    if os.environ.get("TERMUX_VERSION") or os.environ.get("ANDROID_ROOT") or "com.termux" in os.environ.get("PREFIX", ""):
+        return True
+    # Outros sistemas: só se não houver nenhum "nameserver" configurado (o Go cairia em [::1]:53).
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8", errors="ignore") as f:
+            return not any(line.split()[:1] == ["nameserver"] for line in f)
+    except OSError:
+        return True
 
 
 def resolve(host):
@@ -259,6 +271,136 @@ def chisel_env(base):
     if cert and os.path.isfile(cert) and "SSL_CERT_FILE" not in env:
         env["SSL_CERT_FILE"] = cert
     return env
+
+
+# ---------------------------------------------------------------- SOCKS5 local (Android)
+#
+# A Evolution manda os nomes (ex.: web.whatsapp.com) para o proxy resolver. No Android, o SOCKS
+# interno do chisel resolveria com o DNS quebrado do Go ([::1]:53). Por isso, no Android, o chisel
+# só repassa o tráfego (R:127.0.0.1:<porta>:127.0.0.1:<local>) para este SOCKS5, que resolve os
+# nomes com o DNS do Android (getaddrinfo do Python) e abre as conexões. Só aceita conexões locais.
+
+SOCKS_CONNECT_TIMEOUT = 20
+
+
+def _socks_reply(code, host="0.0.0.0", port=0):
+    try:
+        addr = socket.inet_pton(socket.AF_INET, host)
+        atyp = b"\x01"
+    except OSError:
+        try:
+            addr = socket.inet_pton(socket.AF_INET6, host)
+            atyp = b"\x04"
+        except OSError:
+            addr, atyp = b"\x00\x00\x00\x00", b"\x01"
+    return b"\x05" + bytes([code]) + b"\x00" + atyp + addr + port.to_bytes(2, "big")
+
+
+def _error_code(exc):
+    if isinstance(exc, socket.gaierror):
+        return 0x04  # host inalcançável (nome não encontrado)
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return 0x04
+    if isinstance(exc, ConnectionRefusedError):
+        return 0x05
+    if isinstance(exc, OSError) and exc.errno in (errno.ENETUNREACH,):
+        return 0x03
+    if isinstance(exc, OSError) and exc.errno in (errno.EHOSTUNREACH,):
+        return 0x04
+    return 0x01
+
+
+async def _pipe(reader, writer):
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, OSError, asyncio.CancelledError):
+        pass
+    finally:
+        try:
+            if writer.can_write_eof():
+                writer.write_eof()
+        except (OSError, RuntimeError):
+            pass
+
+
+async def _socks_client(reader, writer):
+    remote_writer = None
+    try:
+        head = await reader.readexactly(2)
+        if head[0] != 5:
+            return
+        await reader.readexactly(head[1])  # métodos oferecidos
+        writer.write(b"\x05\x00")  # sem autenticação (só escuta em 127.0.0.1)
+        await writer.drain()
+
+        ver, cmd, _, atyp = await reader.readexactly(4)
+        if atyp == 1:
+            host = socket.inet_ntop(socket.AF_INET, await reader.readexactly(4))
+        elif atyp == 3:
+            host = (await reader.readexactly((await reader.readexactly(1))[0])).decode("idna")
+        elif atyp == 4:
+            host = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
+        else:
+            writer.write(_socks_reply(0x08))
+            return
+        port = int.from_bytes(await reader.readexactly(2), "big")
+        if ver != 5 or cmd != 1:  # só CONNECT
+            writer.write(_socks_reply(0x07))
+            return
+
+        try:
+            remote_reader, remote_writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), SOCKS_CONNECT_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 — qualquer falha vira resposta SOCKS
+            writer.write(_socks_reply(_error_code(exc)))
+            return
+        bound = remote_writer.get_extra_info("sockname") or ("0.0.0.0", 0)
+        writer.write(_socks_reply(0x00, bound[0], bound[1]))
+        await writer.drain()
+        await asyncio.gather(_pipe(reader, remote_writer), _pipe(remote_reader, writer))
+    except (asyncio.IncompleteReadError, ConnectionError, OSError):
+        pass
+    finally:
+        for w in (writer, remote_writer):
+            if w is not None:
+                try:
+                    w.close()
+                except (OSError, RuntimeError):
+                    pass
+
+
+class LocalSocks:
+    """SOCKS5 em 127.0.0.1 numa porta livre, rodando numa thread própria."""
+
+    def __init__(self):
+        self.port = None
+        self._ready = threading.Event()
+        self._error = None
+        threading.Thread(target=self._run, daemon=True).start()
+        self._ready.wait(10)
+        if self._error:
+            raise self._error
+        if self.port is None:
+            raise RuntimeError("o SOCKS local não iniciou")
+
+    def _run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            server = loop.run_until_complete(
+                asyncio.start_server(_socks_client, "127.0.0.1", 0))
+            self.port = server.sockets[0].getsockname()[1]
+        except Exception as exc:  # noqa: BLE001
+            self._error = exc
+            self._ready.set()
+            return
+        self._ready.set()
+        loop.run_forever()
 
 
 # ---------------------------------------------------------------- tradução do log
@@ -344,8 +486,13 @@ class Supervisor:
             subprocess.run(["termux-wake-lock"], check=False)  # impede o Android de "dormir" o túnel
         binary = ensure_chisel()
         port = self.cfg["port"]
-        remote = f"R:127.0.0.1:{port}:socks"
-        say(f"Evo Proxy (TV box) — relay {self.cfg['relay_url']}, porta {port}")
+        say(f"Evo Proxy (TV box) v{VERSION} — relay {self.cfg['relay_url']}, porta {port}")
+        if needs_manual_dns():
+            local = LocalSocks()
+            remote = f"R:127.0.0.1:{port}:127.0.0.1:{local.port}"
+            say("DNS pelo Android: as conexões do WhatsApp passam pelo SOCKS local deste aparelho")
+        else:
+            remote = f"R:127.0.0.1:{port}:socks"
 
         while not self.stopping:
             env = chisel_env(os.environ)
@@ -494,6 +641,12 @@ LABELS = {
 }
 
 
+def cmd_restart(_args=None):
+    if is_running():
+        cmd_stop()
+    cmd_start()
+
+
 def cmd_status(_args=None):
     state = read_json(STATE_FILE) or {}
     running = is_running()
@@ -534,6 +687,7 @@ def main():
         ("config", cmd_config, "configurar o relay"),
         ("start", cmd_start, "ligar em segundo plano"),
         ("stop", cmd_stop, "desligar"),
+        ("restart", cmd_restart, "religar (use depois de atualizar)"),
         ("status", cmd_status, "ver o estado"),
         ("log", cmd_log, "acompanhar o log"),
         ("run", cmd_run, "rodar em primeiro plano"),

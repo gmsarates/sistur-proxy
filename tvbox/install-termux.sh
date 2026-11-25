@@ -21,4 +21,5 @@ chmod 755 "$HOME/.termux/boot/evoproxy-tv"
 echo "Instalado. Agora vamos configurar:"
 echo
 evoproxy-tv config
-evoproxy-tv start
+# restart: se já estava rodando (atualização), troca o processo antigo pelo novo
+evoproxy-tv restart
