@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 
 APP = "evoproxy-tv"
-VERSION = "2026.11.25-3"
+VERSION = "2026.11.26-1"
 CHISEL_VERSION = "1.10.1"
 # Checksums oficiais (chisel_1.10.1_checksums.txt do GitHub do chisel).
 CHISEL_SHA256 = {
@@ -47,7 +47,7 @@ CHISEL_SHA256 = {
     "linux_386": "9737179a33736ecfd3bc6c25d48c0b64285bbc7d06f6494f8650e945cf538741",
     "linux_amd64": "0525aa3c5d457f2a4075e66221d5125d434bedf15006d3271c213f5cd6ff2230",
 }
-DEFAULT_PORT = 1082  # porta do túnel no relay: o app do PC usa 1081, a TV box 1082
+DEFAULT_PORT = 1081  # porta do túnel no relay. Ordem de prioridade: 1081 TV box, 1082 PC, 1083 celular…
 RESTART_DELAY = 5  # segundos antes de reabrir o chisel se ele fechar
 AUTH_FAIL_RETRY = 60  # senha errada: tenta de novo devagar (pode ter sido trocada no relay)
 DNS_RETRY = 15  # sem internet / DNS: tenta de novo a cada 15s
@@ -143,7 +143,7 @@ def cmd_config(_args=None):
     user = ask("Usuário", old.get("user"))
     password = ask("Senha", old.get("password"), secret=True)
     while True:
-        raw = ask("Porta do túnel no relay (cada aparelho conectado ao mesmo tempo precisa de uma)",
+        raw = ask("Porta do túnel no relay (uma por aparelho; ordem: 1081 TV box, 1082 PC, 1083 celular…)",
                   str(old.get("port", DEFAULT_PORT)))
         if raw.isdigit() and 1 <= int(raw) <= 65535:
             port = int(raw)

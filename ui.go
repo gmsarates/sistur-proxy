@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ type UI struct {
 	statusLabel *widget.Label
 	detailLabel *widget.Label
 	relayLabel  *widget.Label
+	portLabel   *widget.Label
 	ipLabel     *widget.Label
 	evoLabel    *widget.Label
 	connectBtn  *widget.Button
@@ -53,6 +55,7 @@ type UI struct {
 	logBuf    []string
 
 	connectedSince time.Time
+	portBusy       bool // o relay recusou a porta: outro aparelho está usando
 }
 
 func newUI(a fyne.App, minimized bool) *UI {
@@ -111,6 +114,7 @@ func (u *UI) build() fyne.CanvasObject {
 
 	u.statusLabel = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	u.detailLabel = widget.NewLabel("")
+	u.detailLabel.Wrapping = fyne.TextWrapWord
 	u.detailLabel.Importance = widget.LowImportance
 
 	u.connectBtn = widget.NewButtonWithIcon("Conectar", theme.MediaPlayIcon(), u.toggleConnection)
@@ -125,12 +129,14 @@ func (u *UI) build() fyne.CanvasObject {
 
 	u.relayLabel = widget.NewLabel("")
 	u.relayLabel.Truncation = fyne.TextTruncateEllipsis
+	u.portLabel = widget.NewLabel("")
 	u.ipLabel = widget.NewLabel("—")
 	u.evoLabel = widget.NewLabel("")
 	u.evoLabel.Wrapping = fyne.TextWrapWord
 
 	info := widget.NewForm(
 		widget.NewFormItem("Relay", u.relayLabel),
+		widget.NewFormItem("Porta do túnel", u.portLabel),
 		widget.NewFormItem("IP de saída", u.ipLabel),
 		widget.NewFormItem("Na Evolution", u.evoLabel),
 	)
@@ -157,6 +163,7 @@ func (u *UI) refreshInfo() {
 	} else {
 		u.relayLabel.SetText(u.cfg.RelayURL)
 	}
+	u.portLabel.SetText(fmt.Sprintf("%d · o relay usa os aparelhos na ordem das portas (1081, 1082, 1083…)", u.cfg.Port))
 	u.evoLabel.SetText("proxy socks5 · host <nome-do-relay>.railway.internal · porta 1080")
 }
 
@@ -171,6 +178,7 @@ func (u *UI) toggleConnection() {
 }
 
 func (u *UI) connect() {
+	u.portBusy = false
 	if !u.cfg.Complete() {
 		u.showSettings(false)
 		return
@@ -325,16 +333,29 @@ func (u *UI) consumeLogs() {
 					u.setState(stConnecting, "")
 				}
 			case evConnected:
+				u.portBusy = false
 				u.setState(stConnected, "")
 				go u.fetchExitIP()
 			case evReconnecting:
-				u.setState(stReconnecting, msg)
+				if u.portBusy && strings.HasPrefix(msg, "Tentando de novo") {
+					u.setState(stReconnecting, u.portBusyMessage()+" "+msg+".")
+				} else {
+					u.portBusy = false
+					u.setState(stReconnecting, msg)
+				}
+			case evPortBusy:
+				u.portBusy = true
+				u.setState(stReconnecting, u.portBusyMessage())
 			case evAuthFailed:
 				u.tunnel.Stop()
 				u.setState(stError, "Usuário ou senha do relay incorretos. Confira em Configurações.")
 			}
 		})
 	}
+}
+
+func (u *UI) portBusyMessage() string {
+	return fmt.Sprintf("A porta %d já está em uso por outro aparelho no relay. Escolha outra em Configurações.", u.cfg.Port)
 }
 
 func (u *UI) appendLog(clock, msg string) {
@@ -383,6 +404,10 @@ func (u *UI) showSettings(firstRun bool) {
 	pass.SetText(u.cfg.Password)
 	pass.Validator = validateNotEmpty("a senha")
 
+	port := widget.NewEntry()
+	port.SetText(strconv.Itoa(u.cfg.Port))
+	port.Validator = validatePort
+
 	autoConnect := widget.NewCheck("Conectar automaticamente ao abrir o app", nil)
 	autoConnect.SetChecked(u.cfg.AutoConnect || firstRun)
 	autoStart := widget.NewCheck("Abrir junto com o sistema (na bandeja)", nil)
@@ -392,6 +417,7 @@ func (u *UI) showSettings(firstRun bool) {
 		{Text: "Endereço do relay", Widget: relay, HintText: "Domínio público do serviço relay no Railway"},
 		{Text: "Usuário", Widget: user, HintText: "O mesmo da variável AUTH do relay (usuario:senha)"},
 		{Text: "Senha", Widget: pass},
+		{Text: "Porta do túnel", Widget: port, HintText: "Uma por aparelho. O relay usa na ordem: 1081 TV box, 1082 PC, 1083 celular…"},
 		{Text: "", Widget: autoConnect},
 		{Text: "", Widget: autoStart},
 	}
@@ -404,10 +430,12 @@ func (u *UI) showSettings(firstRun bool) {
 		if !ok {
 			return
 		}
+		portNum, _ := strconv.Atoi(strings.TrimSpace(port.Text))
 		newCfg := Config{
 			RelayURL:    normalizeRelayURL(relay.Text),
 			User:        strings.TrimSpace(user.Text),
 			Password:    pass.Text,
+			Port:        portNum,
 			AutoConnect: autoConnect.Checked,
 			AutoStart:   autoStart.Checked,
 		}
@@ -418,7 +446,7 @@ func (u *UI) showSettings(firstRun bool) {
 			}
 		}
 		changed := newCfg.RelayURL != u.cfg.RelayURL || newCfg.User != u.cfg.User ||
-			newCfg.Password != u.cfg.Password
+			newCfg.Password != u.cfg.Password || newCfg.Port != u.cfg.Port
 		u.cfg = newCfg
 		saveConfig(u.app.Preferences(), newCfg)
 		u.refreshInfo()

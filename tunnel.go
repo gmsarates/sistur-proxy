@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -10,9 +11,12 @@ import (
 
 // Tunnel controla o cliente chisel. O relay recebe uma porta SOCKS5 (na rede
 // privada do Railway) e cada conexão feita nela sai por esta máquina.
-// O SOCKS fica só no localhost do relay (porta 1081); o próprio relay o expõe
-// na rede privada do Railway na porta SOCKS_PORT (padrão 1080). Ver relay/start.sh.
-const tunnelRemote = "R:127.0.0.1:1081:socks"
+// O SOCKS fica só no localhost do relay, na porta do túnel deste aparelho (cfg.Port);
+// o relay expõe para a Evolution, na rede privada do Railway, o primeiro aparelho
+// disponível na ordem de TUNNEL_PORTS. Ver relay/start.sh.
+func tunnelRemote(port int) string {
+	return fmt.Sprintf("R:127.0.0.1:%d:socks", port)
+}
 
 type Tunnel struct {
 	mu     sync.Mutex
@@ -33,7 +37,7 @@ func (t *Tunnel) Start(cfg Config, onExit func(error)) error {
 	c, err := chclient.NewClient(&chclient.Config{
 		Server:           cfg.RelayURL,
 		Auth:             cfg.User + ":" + cfg.Password,
-		Remotes:          []string{tunnelRemote},
+		Remotes:          []string{tunnelRemote(cfg.Port)},
 		KeepAlive:        25 * time.Second,
 		MaxRetryCount:    -1, // tenta para sempre
 		MaxRetryInterval: 15 * time.Second,

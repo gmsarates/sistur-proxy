@@ -52,6 +52,7 @@ const (
 	evConnected
 	evReconnecting
 	evAuthFailed
+	evPortBusy
 )
 
 // parseLogLine devolve o horário, a mensagem traduzida e o evento da linha.
@@ -67,6 +68,8 @@ func parseLogLine(line string) (clock, msg string, ev tunnelEvent) {
 		return clock, "Conectado (latência " + reConnected.FindStringSubmatch(line)[1] + ")", evConnected
 	case reRetry.MatchString(line):
 		return clock, "Tentando de novo em " + reRetry.FindStringSubmatch(line)[1], evReconnecting
+	case reConnErr.MatchString(line) && strings.Contains(strings.ToLower(line), "cannot listen"):
+		return clock, "A porta do túnel já está em uso por outro aparelho no relay", evPortBusy
 	case reConnErr.MatchString(line):
 		return clock, "Erro de conexão: " + reConnErr.FindStringSubmatch(line)[1], evReconnecting
 	case strings.HasPrefix(line, "client: Disconnected"):

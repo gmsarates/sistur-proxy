@@ -13,8 +13,8 @@ SOCKS_PORT="${SOCKS_PORT:-1080}"
 
 # Portas do túnel, em ordem de prioridade: cada aparelho conectado (app do PC, TV box...)
 # abre o seu SOCKS em 127.0.0.1:<porta> aqui dentro. O gost usa sempre o primeiro que
-# estiver disponível; se ele cair, passa para o próximo. Padrão: 1081 a 1090 (PC = 1081,
-# TV box = 1082, outros aparelhos 1083, 1084...). Porta sem aparelho é pulada.
+# estiver disponível; se ele cair, passa para o próximo. Padrão: 1081 a 1090 (TV box = 1081,
+# PC = 1082, celular = 1083, outros 1084...). Porta sem aparelho é pulada.
 TUNNEL_PORTS="${TUNNEL_PORTS:-1081,1082,1083,1084,1085,1086,1087,1088,1089,1090}"
 case "$TUNNEL_PORTS" in
   *[!0-9,]*|,*|*,|*,,*) echo "ERRO: TUNNEL_PORTS deve ser uma lista de portas separadas por vírgula, ex.: 1081,1082" >&2; exit 1 ;;

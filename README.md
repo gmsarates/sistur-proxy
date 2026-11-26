@@ -25,7 +25,7 @@ Como a conexão parte do seu PC, funciona atrás de CGNAT e sem abrir porta no r
    | `AUTH`       | `usuario:senha` do túnel (o app usa este) |
    | `SOCKS_AUTH` | `usuario:senha` do proxy SOCKS (a Evolution usa este). Sem ela, vale o mesmo do `AUTH` |
    | `SOCKS_PORT` | opcional, padrão `1080`                |
-   | `TUNNEL_PORTS` | opcional, padrão `1081,1082,...,1090`: portas dos aparelhos do túnel, em ordem de prioridade (PC = 1081, TV box = 1082, outros aparelhos 1083 em diante). Porta sem aparelho é pulada sem derrubar a conexão |
+   | `TUNNEL_PORTS` | opcional, padrão `1081,1082,...,1090`: portas dos aparelhos do túnel, em ordem de prioridade (TV box = 1081, PC = 1082, celular = 1083, outros 1084 em diante). Porta sem aparelho é pulada sem derrubar a conexão |
    | `GOST_DEBUG` | opcional, `1` mostra no log por qual aparelho sai cada conexão |
 
    Senhas sem espaço. O SOCKS **sempre** exige usuário e senha: a Evolution não grava
@@ -60,6 +60,7 @@ Abra **Evo Proxy** no menu. Na primeira vez aparece a janela de configuração:
 
 - **Endereço do relay:** o domínio público do passo 1 (`https://` é completado sozinho)
 - **Usuário / Senha:** os mesmos da variável `AUTH`
+- **Porta do túnel:** uma por aparelho; define a prioridade no relay (1081 TV box, **1082 PC** — padrão do app —, 1083 celular…)
 - **Conectar automaticamente ao abrir** e **Abrir junto com o sistema**
 
 Os dados ficam salvos pelo próprio app em `~/.config/fyne/app.evoproxy/preferences.json`.
