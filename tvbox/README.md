@@ -39,17 +39,18 @@ bash tvbox/install-termux.sh   # Enter em cada pergunta mantém os dados atuais
 ```
 O instalador religa o túnel com a versão nova. No `evoproxy-tv log`, a primeira linha mostra a versão em uso.
 
-## PC e TV box ao mesmo tempo
+## Vários aparelhos ao mesmo tempo
 
-Cada aparelho conectado ao relay usa uma **porta do túnel** própria: o app do PC usa a `1081` e a
-TV box a `1082` (padrão do `evoproxy-tv config`). Os dois ficam conectados ao mesmo tempo e o relay
-manda as conexões da Evolution para o **primeiro disponível**, na ordem da variável `TUNNEL_PORTS`
-do relay (padrão `1081,1082`: PC primeiro, TV box de reserva). Se um cair, o outro assume.
+Cada aparelho conectado ao relay usa uma **porta do túnel** própria: o app do PC usa a `1081`, a primeira
+TV box a `1082` (padrão do `evoproxy-tv config`) e os próximos aparelhos `1083`, `1084`… até `1090`.
+Todos ficam conectados ao mesmo tempo e o relay manda as conexões da Evolution para o **primeiro disponível**,
+na ordem da variável `TUNNEL_PORTS` do relay (padrão `1081` a `1090`). Se um cair, o próximo assume na
+mesma conexão.
 
-- Para a TV box ser a preferida (ela fica sempre ligada), defina no relay `TUNNEL_PORTS=1082,1081`.
+- Para mudar a prioridade (ex.: TV box antes do PC), defina no relay `TUNNEL_PORTS=1082,1081,1083,...`.
+- Mais de 10 aparelhos: acrescente as portas em `TUNNEL_PORTS`.
 - Dois aparelhos **não podem** usar a mesma porta: o segundo fica "Esperando a porta liberar".
-- Os aparelhos ficam na mesma casa, então saem pelo **mesmo IP** — para o WhatsApp tanto faz qual
-  deles está ativo.
+- Aparelhos na mesma casa saem pelo **mesmo IP** — para o WhatsApp tanto faz qual deles está ativo.
 
 ## Detalhes
 

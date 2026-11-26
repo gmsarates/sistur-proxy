@@ -13,16 +13,19 @@ SOCKS_PORT="${SOCKS_PORT:-1080}"
 
 # Portas do túnel, em ordem de prioridade: cada aparelho conectado (app do PC, TV box...)
 # abre o seu SOCKS em 127.0.0.1:<porta> aqui dentro. O gost usa sempre o primeiro que
-# estiver disponível; se ele cair, passa para o próximo. Padrão: PC (1081), depois TV box (1082).
-TUNNEL_PORTS="${TUNNEL_PORTS:-1081,1082}"
+# estiver disponível; se ele cair, passa para o próximo. Padrão: 1081 a 1090 (PC = 1081,
+# TV box = 1082, outros aparelhos 1083, 1084...). Porta sem aparelho é pulada.
+TUNNEL_PORTS="${TUNNEL_PORTS:-1081,1082,1083,1084,1085,1086,1087,1088,1089,1090}"
 case "$TUNNEL_PORTS" in
   *[!0-9,]*|,*|*,|*,,*) echo "ERRO: TUNNEL_PORTS deve ser uma lista de portas separadas por vírgula, ex.: 1081,1082" >&2; exit 1 ;;
 esac
 FIRST_PORT="${TUNNEL_PORTS%%,*}"
 TUNNEL_IPS=""
+TUNNEL_COUNT=0
 OLD_IFS="$IFS"; IFS=','
 for p in $TUNNEL_PORTS; do
   TUNNEL_IPS="${TUNNEL_IPS:+$TUNNEL_IPS,}127.0.0.1:$p"
+  TUNNEL_COUNT=$((TUNNEL_COUNT + 1))
 done
 IFS="$OLD_IFS"
 
@@ -48,14 +51,17 @@ printf '%s %s\n' "$SOCKS_USER" "$SOCKS_PASS" > "$SECRETS"
 # Cada aparelho abre um SOCKS sem senha em 127.0.0.1:<porta> dentro deste container (túnel chisel).
 # O gost expõe na rede privada (IPv4 e IPv6) um SOCKS5 que exige usuário e senha
 # e repassa cada conexão para o primeiro aparelho disponível (strategy=fifo).
-# Um aparelho cuja porta não responde fica de fora por 10s (max_fails/fail_timeout):
-# aquela conexão falha e as seguintes já vão para o próximo (a Evolution reconecta
-# sozinha). Sem nenhum aparelho, a conexão falha: nunca sai pelo IP do data center.
+# Um aparelho cuja porta não responde fica de fora por 10s (max_fails/fail_timeout) e a
+# mesma conexão é tentada no próximo da lista ("Retries", que o gost só lê de arquivo -C;
+# uma tentativa por porta). Sem nenhum aparelho, a conexão falha: nunca sai pelo IP do
+# data center.
 GOST_DEBUG_FLAG=""
 [ "$GOST_DEBUG" = "1" ] && GOST_DEBUG_FLAG="-D"
+GOST_CONFIG=/tmp/gost.json
+printf '{"Retries": %s}\n' "$TUNNEL_COUNT" > "$GOST_CONFIG"
 (
   while true; do
-    gost $GOST_DEBUG_FLAG \
+    gost $GOST_DEBUG_FLAG -C "$GOST_CONFIG" \
       -L "socks5://:${SOCKS_PORT}?secrets=${SECRETS}" \
       -F "socks5://127.0.0.1:${FIRST_PORT}?ip=${TUNNEL_IPS}&strategy=fifo&max_fails=1&fail_timeout=10s" || true
     sleep 1
@@ -63,6 +69,6 @@ GOST_DEBUG_FLAG=""
 ) &
 
 echo "SOCKS5 com senha para a Evolution na porta $SOCKS_PORT (rede privada), usuário: $SOCKS_USER"
-echo "Aparelhos do túnel, em ordem de prioridade: $TUNNEL_IPS"
+echo "Aparelhos do túnel, em ordem de prioridade: $TUNNEL_IPS ($TUNNEL_COUNT tentativas por conexão)"
 # chisel lê AUTH do ambiente
 exec chisel server --reverse --host 0.0.0.0 --port "${PORT:-8080}"

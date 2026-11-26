@@ -25,7 +25,7 @@ Como a conexão parte do seu PC, funciona atrás de CGNAT e sem abrir porta no r
    | `AUTH`       | `usuario:senha` do túnel (o app usa este) |
    | `SOCKS_AUTH` | `usuario:senha` do proxy SOCKS (a Evolution usa este). Sem ela, vale o mesmo do `AUTH` |
    | `SOCKS_PORT` | opcional, padrão `1080`                |
-   | `TUNNEL_PORTS` | opcional, padrão `1081,1082`: portas dos aparelhos do túnel, em ordem de prioridade (PC = 1081, TV box = 1082) |
+   | `TUNNEL_PORTS` | opcional, padrão `1081,1082,...,1090`: portas dos aparelhos do túnel, em ordem de prioridade (PC = 1081, TV box = 1082, outros aparelhos 1083 em diante). Porta sem aparelho é pulada sem derrubar a conexão |
    | `GOST_DEBUG` | opcional, `1` mostra no log por qual aparelho sai cada conexão |
 
    Senhas sem espaço. O SOCKS **sempre** exige usuário e senha: a Evolution não grava
