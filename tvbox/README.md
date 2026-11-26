@@ -31,6 +31,26 @@ Usa o mesmo relay e o mesmo login (`AUTH`) do app de PC.
 Ele liga sozinho quando a TV box liga (Termux:Boot), reconecta sozinho se a internet ou o relay cair
 e impede o Android de suspender o Termux (`termux-wake-lock`).
 
+## Ligar sozinho quando a TV box liga
+
+Quem faz isso é o app **Termux:Boot**: ao ligar, ele roda `~/.termux/boot/evoproxy-tv` (criado pelo
+instalador), que liga o túnel em segundo plano. A tela do Termux **não precisa abrir**.
+
+Para funcionar:
+1. **Termux:Boot instalado do mesmo lugar que o Termux** (os dois do F-Droid). De lojas diferentes, o
+   Android não deixa um rodar scripts do outro.
+2. **Abra o Termux:Boot uma vez** depois de instalar. Até isso, o Android não avisa o app quando liga.
+3. Nas configurações do Android, **desative a otimização de bateria** do Termux e do Termux:Boot e, se a
+   TV box tiver a opção, **permita o início automático** (às vezes em "Apps → Inicialização automática").
+
+Para conferir depois de reiniciar a TV box:
+```bash
+cat ~/.config/evoproxy-tv/boot.log   # cada vez que o Termux:Boot roda, aparece uma linha com a data
+evoproxy-tv status
+```
+Sem linha nova no `boot.log`, o Termux:Boot não rodou (itens 1 a 3 acima). Com linha nova mas o túnel
+desligado, veja o `evoproxy-tv log`.
+
 ## Atualizar
 
 ```bash
